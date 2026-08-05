@@ -32,3 +32,5 @@ dub/
 
 
 .env*
+
+.DS_Store
