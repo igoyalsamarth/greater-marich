@@ -1,0 +1,26 @@
+[project]
+name = "greater-marich"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { email = "samarth.goyal1999@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "bs-roformer-infer[mlx] @ git+https://github.com/openmirlab/bs-roformer-infer.git",
+    "python-dotenv>=1.0.0",
+    "sarvamai>=0.1.30",
+    "typer>=0.15.0",
+    "yt-dlp>=2025.1.0",
+]
+
+[project.scripts]
+greater-marich = "main:main"
+
+[tool.uv]
+package = false
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
