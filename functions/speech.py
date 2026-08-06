@@ -9,15 +9,14 @@ from typing import Any
 
 from client.sarvam_client import get_sarvam_client
 from functions.audio import match_volume_to_reference
+from functions.dialogues import dialogue_entries, load_dialogues
 from lib.constants import SEPARATION_DIR, SPEECH_DIR
 
 DEFAULT_TTS_MODEL = "bulbul:v3"
 DEFAULT_SPEAKER = "kabir"
 SPEAKER_VOICE_MAP = {
-    "0": "kabir",
-    "1": "kabir",
-    "2": "kabir",
-    "3": "suhani",
+    "char_0": "aditya",
+    "char_1": "roopa",
 }
 
 
@@ -27,6 +26,36 @@ def _speech_dir_for_name(name: str) -> Path:
 
 def _speaker_for_id(speaker_id: str) -> str:
     return SPEAKER_VOICE_MAP.get(speaker_id, DEFAULT_SPEAKER)
+
+
+def _entry_text(entry: dict[str, Any]) -> str:
+    return str(entry.get("transcript") or entry.get("text") or "")
+
+
+def _entry_start(entry: dict[str, Any]) -> float:
+    if "start" in entry:
+        return float(entry["start"])
+    return float(entry["start_time_seconds"])
+
+
+def _entry_end(entry: dict[str, Any]) -> float:
+    if "end" in entry:
+        return float(entry["end"])
+    return float(entry["end_time_seconds"])
+
+
+def _entry_duration(entry: dict[str, Any]) -> float:
+    return max(_entry_end(entry) - _entry_start(entry), 0.0)
+
+
+def _entry_speaker_id(entry: dict[str, Any]) -> str:
+    return str(entry.get("speaker_id") or entry.get("character_id") or "")
+
+
+def _source_name(path: Path) -> str:
+    if path.stem == "dialogues":
+        return path.parent.name
+    return path.stem
 
 
 def _segment_id(index: int) -> str:
@@ -51,12 +80,15 @@ def generate_speech_snippets(
 ) -> Path:
     """Generate TTS audio for each diarized entry and write a segment mapping.
 
+    Reads ``outputs/translate/<name>/dialogues.json`` (or STT dialogues) and
+    writes per-line WAV clips under ``outputs/speech/<name>/``.
+
     Each snippet is volume-matched to the corresponding slice of the separated
-    vocals track from ``separation/<name>/<name>_vocals.wav``.
+    vocals track. Sarvam Bulbul v3 is called with text, speaker, and language only.
 
     Args:
         transcript_json: Path to translated (or STT) JSON with diarized entries.
-        output_dir: Output directory. Defaults to ``speech/<name>/``.
+        output_dir: Output directory. Defaults to ``outputs/speech/<name>/``.
         model: Sarvam TTS model.
 
     Returns:
@@ -66,12 +98,10 @@ def generate_speech_snippets(
     if not transcript_path.is_file():
         raise FileNotFoundError(f"Transcript JSON not found: {transcript_path}")
 
-    data: dict[str, Any] = json.loads(transcript_path.read_text(encoding="utf-8"))
-    entries = (data.get("diarized_transcript") or {}).get("entries") or []
-    if not entries:
-        raise RuntimeError("No diarized_transcript entries found in JSON")
+    data = load_dialogues(transcript_path)
+    entries = dialogue_entries(data)
 
-    name = transcript_path.stem
+    name = data.get("name") or _source_name(transcript_path)
     speech_dir = Path(output_dir).expanduser().resolve() if output_dir else _speech_dir_for_name(name)
     speech_dir.mkdir(parents=True, exist_ok=True)
     vocals_path = _vocals_path_for_name(name)
@@ -85,13 +115,19 @@ def generate_speech_snippets(
         audio_file = f"{segment_id}.wav"
         audio_path = speech_dir / audio_file
 
-        text = entry.get("transcript", "").strip()
+        text = _entry_text(entry).strip()
+        speaker_id = _entry_speaker_id(entry)
+        emotion = str(entry.get("emotion") or "neutral")
+        start_seconds = _entry_start(entry)
+        end_seconds = _entry_end(entry)
+        slot_seconds = _entry_duration(entry)
+
         volume_match: dict[str, float] | None = None
         if text:
             response = client.text_to_speech.convert(
                 text=text,
                 language_code=language_code,
-                speaker=_speaker_for_id(str(entry.get("speaker_id", ""))),
+                speaker=_speaker_for_id(speaker_id),
                 model=model,
                 output_audio_codec="wav",
             )
@@ -99,17 +135,21 @@ def generate_speech_snippets(
             volume_match = match_volume_to_reference(
                 audio_path,
                 vocals_path,
-                start_seconds=float(entry["start_time_seconds"]),
-                end_seconds=float(entry["end_time_seconds"]),
+                start_seconds=start_seconds,
+                end_seconds=end_seconds,
             )
 
         segment: dict[str, Any] = {
             "id": segment_id,
             "audio_file": audio_file,
-            "start_time_seconds": entry["start_time_seconds"],
-            "end_time_seconds": entry["end_time_seconds"],
-            "speaker_id": entry.get("speaker_id"),
-            "transcript": entry.get("transcript", ""),
+            "start_time_seconds": round(start_seconds, 3),
+            "end_time_seconds": round(end_seconds, 3),
+            "slot_duration_seconds": round(slot_seconds, 3),
+            "speaker_id": speaker_id,
+            "character_id": speaker_id,
+            "emotion": emotion,
+            "transcript": text,
+            "tts_speaker": _speaker_for_id(speaker_id),
         }
         if volume_match:
             segment["volume_match"] = volume_match
@@ -118,7 +158,11 @@ def generate_speech_snippets(
     mapping = {
         "name": name,
         "language_code": language_code,
+        "source_language_code": data.get("source_language_code"),
         "source_json": str(transcript_path),
+        "source_dialogues": data.get("source_dialogues"),
+        "translation_model": data.get("translation_model"),
+        "tts_model": model,
         "reference_vocals": str(vocals_path),
         "segments": segments,
     }

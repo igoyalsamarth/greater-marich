@@ -22,11 +22,10 @@ def run(
         None,
         "-o",
         "--output",
-        help="Output directory (default: separation/<name>/).",
+        help="Output directory (default: outputs/separation/<name>/).",
         file_okay=False,
         dir_okay=True,
     ),
 ) -> None:
-    """Separate vocals, instruments, and other stems from audio."""
-    path = separate_audio(audio, output)
-    typer.echo(f"Saved to {path}")
+    """Separate vocals (jarredou) and instrumental (unwa) from audio."""
+    path = separate_audio(audio, output, on_checkpoint=typer.echo)

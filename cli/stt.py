@@ -6,6 +6,8 @@ import typer
 
 from functions.stt import (
     DEFAULT_LANGUAGE_CODE,
+    DEFAULT_MODE,
+    DEFAULT_MODEL,
     transcribe_audio,
 )
 
@@ -25,7 +27,7 @@ def transcribe(
         None,
         "-o",
         "--output",
-        help="Output JSON file or directory (default: stt/).",
+        help="Output directory (default: outputs/stt/<name>/).",
         file_okay=True,
         dir_okay=True,
     ),
@@ -34,17 +36,25 @@ def transcribe(
         "--language-code",
         help="Language code of the input audio.",
     ),
-    with_timestamps: bool = typer.Option(
-        True,
-        "--with-timestamps",
-        help="Whether to include timestamps in the transcription.",
+    model: str = typer.Option(
+        DEFAULT_MODEL,
+        "--model",
+        help="Sarvam STT model.",
+    ),
+    mode: str = typer.Option(
+        DEFAULT_MODE,
+        "--mode",
+        help="Transcription mode for saaras models.",
     ),
 ) -> None:
-    """Transcribe separated vocals using Sarvam's batch speech-to-text API."""
-    path = transcribe_audio(
+    """Transcribe separated vocals with Sarvam diarization and emotion enrichment."""
+    dialogues_path = transcribe_audio(
         audio,
         output,
+        model=model,
+        mode=mode,
         language_code=language_code,
-        with_timestamps=with_timestamps,
     )
-    typer.echo(f"Saved to {path}")
+    characters_path = dialogues_path.parent / "characters.json"
+    typer.echo(f"Saved characters to {characters_path}")
+    typer.echo(f"Saved dialogues to {dialogues_path}")

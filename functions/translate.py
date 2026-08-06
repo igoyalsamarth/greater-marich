@@ -1,180 +1,133 @@
-"""Translate diarized STT output using Sarvam's chat LLM."""
+"""Translate diarized STT output using Pydantic AI and OpenAI."""
 
 from __future__ import annotations
 
 import json
-import re
+import os
 from pathlib import Path
 from typing import Any
 
-from client.sarvam_client import get_sarvam_client
+from dotenv import load_dotenv
+
+from functions.dialogues import dialogue_entries, load_dialogues
+from functions.translate_agent import summarize_plot, translate_line
+from functions.translate_models import (
+    CharacterPersona,
+    LinePosition,
+    TranslationRequest,
+    build_plot_summary_request,
+    enriched_dialogue_line,
+    load_character_personas,
+    neighbor_lines,
+    scene_metadata_from_stt,
+    translated_entry_from_source,
+)
 from lib.constants import TRANSLATE_DIR
 
+load_dotenv()
+
 DEFAULT_TARGET_LANGUAGE = "hi-IN"
-DEFAULT_LLM_MODEL = "sarvam-105b"
-DEFAULT_REASONING_EFFORT = "medium"
-DEFAULT_MAX_TOKENS = 2048
+DEFAULT_LLM_MODEL = "gpt-5.4-mini"
 
-SYSTEM_PROMPT = """You are a professional dubbing translator. Translate spoken dialog for voice-over dubbing.
 
-Rules:
-- Translate only the "Current line" into the target language.
-- Preserve meaning, tone, and speaker intent.
-- The dubbed line must be speakable within the given time limit.
-- If needed, rephrase to be shorter while keeping the meaning natural.
-- Output ONLY the translated line, with no quotes, labels, or explanation."""
+def _ensure_openai_api_key() -> None:
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY is not set. Add it to your .env file.")
+
+
+def _source_name(path: Path) -> str:
+    if path.stem == "dialogues":
+        return path.parent.name
+    return path.stem
 
 
 def _resolve_output_path(stt_path: Path, output: str | Path | None) -> Path:
+    name = _source_name(stt_path)
     if output is None:
-        return TRANSLATE_DIR / f"{stt_path.stem}.json"
+        return TRANSLATE_DIR / name / "dialogues.json"
 
     output_path = Path(output).expanduser().resolve()
     if output_path.suffix:
         return output_path
-    return output_path / f"{stt_path.stem}.json"
+    return output_path / "dialogues.json"
 
 
-def _dialog_duration(entry: dict[str, Any]) -> float:
-    return float(entry["end_time_seconds"]) - float(entry["start_time_seconds"])
+def _characters_path_for_stt(stt_path: Path) -> Path:
+    return stt_path.parent / "characters.json"
 
 
-def _format_duration(seconds: float) -> str:
-    if seconds < 1:
-        return f"{seconds * 1000:.0f} ms"
-    return f"{seconds:.2f} s"
-
-
-def _context_line(entries: list[dict[str, Any]], index: int) -> str:
-    if index < 0 or index >= len(entries):
-        return "(none)"
-    text = entries[index].get("transcript", "").strip()
-    return text or "(none)"
-
-
-def _build_translation_prompt(
+def _build_translation_request(
     *,
-    previous_line: str,
-    current_line: str,
-    next_line: str,
-    time_limit: str,
-    source_language_code: str,
-    target_language_code: str,
-) -> str:
-    return f"""Source language: {source_language_code}
-Target language: {target_language_code}
-
-Previous line: {previous_line}
-Current line: {current_line}
-Next line: {next_line}
-
-Time limit: {time_limit} (the translation must fit when spoken aloud)
-
-Translate the current line."""
-
-
-def _strip_wrapping_quotes(text: str) -> str:
-    stripped = text.strip()
-    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {'"', "'"}:
-        return stripped[1:-1].strip()
-    return stripped
-
-
-def _extract_reasoning_translation(reasoning_content: str) -> str | None:
-    patterns = [
-        r"Final output:\s*[`\"']([^`\"']+)[`\"']",
-        r"Final output:\s*([^\n]+)",
-        r"translated line:\s*[`\"']([^`\"']+)[`\"']",
-    ]
-    for pattern in patterns:
-        matches = re.findall(pattern, reasoning_content, flags=re.IGNORECASE)
-        if matches:
-            candidate = _strip_wrapping_quotes(matches[-1])
-            if candidate:
-                return candidate
-
-    backtick_matches = re.findall(r"`([^`]+)`", reasoning_content)
-    for candidate in reversed(backtick_matches):
-        candidate = candidate.strip()
-        if candidate and not candidate.startswith("http"):
-            return candidate
-    return None
-
-
-def _extract_assistant_text(message: Any) -> str | None:
-    content = getattr(message, "content", None)
-    if content and content.strip():
-        return content.strip()
-
-    reasoning_content = getattr(message, "reasoning_content", None)
-    if reasoning_content:
-        return _extract_reasoning_translation(reasoning_content)
-    return None
-
-
-def _fallback_translate(
-    text: str,
-    *,
-    source_language_code: str,
-    target_language_code: str,
-) -> str:
-    client = get_sarvam_client()
-    response = client.text.translate(
-        input=text,
-        source_language_code=source_language_code,
-        target_language_code=target_language_code,
-    )
-    return response.translated_text
-
-
-def _translate_entry(
+    data: dict[str, Any],
     entries: list[dict[str, Any]],
     index: int,
+    personas: dict[str, CharacterPersona],
+    source_language_code: str,
+    target_language_code: str,
+    plot_summary: str,
+    translated_texts: list[str | None],
+) -> TranslationRequest:
+    total = len(entries)
+    return TranslationRequest(
+        source_language_code=source_language_code,
+        target_language_code=target_language_code,
+        plot_summary=plot_summary,
+        line_position=LinePosition(
+            index=index,
+            total=total,
+            is_first=index == 0,
+            is_last=index == total - 1,
+        ),
+        scene=scene_metadata_from_stt(data),
+        characters=sorted(personas.values(), key=lambda persona: persona.id),
+        previous_lines=neighbor_lines(
+            entries=entries,
+            index=index,
+            personas=personas,
+            direction="previous",
+            translated_texts=translated_texts,
+        ),
+        current_line=enriched_dialogue_line(
+            index=index,
+            entry=entries[index],
+            personas=personas,
+            entries=entries,
+            include_speakability_hint=True,
+        ),
+        next_lines=neighbor_lines(
+            entries=entries,
+            index=index,
+            personas=personas,
+            direction="next",
+            translated_texts=translated_texts,
+        ),
+    )
+
+
+def _build_translated_output(
     *,
+    data: dict[str, Any],
     source_language_code: str,
     target_language_code: str,
     model: str,
-) -> str:
-    entry = entries[index]
-    text = entry.get("transcript", "")
-    if not text.strip():
-        return text
-
-    prompt = _build_translation_prompt(
-        previous_line=_context_line(entries, index - 1),
-        current_line=text.strip(),
-        next_line=_context_line(entries, index + 1),
-        time_limit=_format_duration(_dialog_duration(entry)),
-        source_language_code=source_language_code,
-        target_language_code=target_language_code,
-    )
-
-    client = get_sarvam_client()
-    response = client.chat.completions(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.2,
-        reasoning_effort=DEFAULT_REASONING_EFFORT,
-        max_tokens=DEFAULT_MAX_TOKENS,
-    )
-    choice = response.choices[0]
-    translated = _extract_assistant_text(choice.message)
-    if not translated:
-        if choice.finish_reason == "length":
-            translated = _fallback_translate(
-                text.strip(),
-                source_language_code=source_language_code,
-                target_language_code=target_language_code,
-            )
-        else:
-            raise RuntimeError(
-                f"No translation returned for entry {index + 1} "
-                f"(finish_reason={choice.finish_reason})"
-            )
-    return _strip_wrapping_quotes(translated)
+    source_dialogues_path: Path,
+    plot_summary: str,
+    translated_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "name": data.get("name"),
+        "language_code": target_language_code,
+        "source_language_code": source_language_code,
+        "source_audio": data.get("source_audio"),
+        "source_dialogues": str(source_dialogues_path),
+        "num_speakers": data.get("num_speakers"),
+        "translation_model": model,
+        "plot_summary": plot_summary,
+        "transcript": " ".join(
+            entry["transcript"] for entry in translated_entries if entry.get("transcript")
+        ),
+        "diarized_transcript": {"entries": translated_entries},
+    }
 
 
 def translate_diarized_transcript(
@@ -185,55 +138,74 @@ def translate_diarized_transcript(
     target_language_code: str = DEFAULT_TARGET_LANGUAGE,
     model: str = DEFAULT_LLM_MODEL,
 ) -> Path:
-    """Translate each entry in an STT JSON's diarized transcript.
+    """Translate each dialogue entry using a two-step Pydantic AI flow with OpenAI.
+
+    Step 1 summarizes the full scene for plot context. Step 2 translates each line
+    with that summary, character personas, and surrounding dialogue context.
 
     Args:
-        stt_path: Path to the STT output JSON file.
-        output: Output JSON file or directory. Defaults to ``translate/<name>.json``.
+        stt_path: Path to ``outputs/stt/<name>/dialogues.json``.
+        output: Output JSON file or directory. Defaults to ``outputs/translate/<name>/dialogues.json``.
         source_language_code: Source language. Defaults to the STT file's ``language_code``.
         target_language_code: Target language for translation.
-        model: Sarvam chat model to use for translation.
+        model: OpenAI chat model to use for translation.
 
     Returns:
         Path to the saved translated JSON file.
     """
+    _ensure_openai_api_key()
+
     stt_path = Path(stt_path).expanduser().resolve()
     if not stt_path.is_file():
         raise FileNotFoundError(f"STT file not found: {stt_path}")
 
-    data: dict[str, Any] = json.loads(stt_path.read_text(encoding="utf-8"))
-    diarized = data.get("diarized_transcript") or {}
-    entries = diarized.get("entries") or []
-    if not entries:
-        raise RuntimeError("No diarized_transcript entries found in STT JSON")
-
+    data = load_dialogues(stt_path)
+    entries = dialogue_entries(data)
     source_language = source_language_code or data.get("language_code") or "auto"
+    personas = load_character_personas(_characters_path_for_stt(stt_path))
 
-    translated_entries = []
-    for index, entry in enumerate(entries):
-        translated_entries.append(
-            {
-                **entry,
-                "transcript": _translate_entry(
-                    entries,
-                    index,
-                    source_language_code=source_language,
-                    target_language_code=target_language_code,
-                    model=model,
-                ),
-            }
-        )
-
-    output_data = {**data}
-    output_data["diarized_transcript"] = {"entries": translated_entries}
-    output_data["language_code"] = target_language_code
-    output_data["transcript"] = " ".join(
-        entry["transcript"] for entry in translated_entries if entry["transcript"]
+    plot_summary = summarize_plot(
+        build_plot_summary_request(
+            data=data,
+            entries=entries,
+            personas=personas,
+            source_language_code=source_language,
+        ),
+        model=model,
     )
 
-    timestamps = output_data.get("timestamps")
-    if isinstance(timestamps, dict) and "words" in timestamps:
-        timestamps["words"] = [entry["transcript"] for entry in translated_entries]
+    translated_entries: list[dict[str, Any]] = []
+    translated_texts: list[str | None] = [None] * len(entries)
+
+    for index, entry in enumerate(entries):
+        current_text = str(entry.get("transcript") or entry.get("text") or "").strip()
+        if not current_text:
+            translated_entries.append(translated_entry_from_source(entry, ""))
+            continue
+
+        request = _build_translation_request(
+            data=data,
+            entries=entries,
+            index=index,
+            personas=personas,
+            source_language_code=source_language,
+            target_language_code=target_language_code,
+            plot_summary=plot_summary,
+            translated_texts=translated_texts,
+        )
+        translated_text = translate_line(request, model=model)
+        translated_texts[index] = translated_text
+        translated_entries.append(translated_entry_from_source(entry, translated_text))
+
+    output_data = _build_translated_output(
+        data=data,
+        source_language_code=source_language,
+        target_language_code=target_language_code,
+        model=model,
+        source_dialogues_path=stt_path,
+        plot_summary=plot_summary,
+        translated_entries=translated_entries,
+    )
 
     output_path = _resolve_output_path(stt_path, output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

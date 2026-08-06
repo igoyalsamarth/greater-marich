@@ -43,7 +43,7 @@ def convert_video_to_audio(
 
     Args:
         input_path: Path to the source video file.
-        output: Output file or directory. Defaults to ``audio/<name>.wav``.
+        output: Output file or directory. Defaults to ``outputs/audio/<name>.wav``.
 
     Returns:
         Path to the created audio file.

@@ -1,10 +1,11 @@
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-VIDEOS_DIR = PROJECT_ROOT / "videos"
-SEPARATION_DIR = PROJECT_ROOT / "separation"
-AUDIO_DIR = PROJECT_ROOT / "audio"
-STT_DIR = PROJECT_ROOT / "stt"
-TRANSLATE_DIR = PROJECT_ROOT / "translate"
-SPEECH_DIR = PROJECT_ROOT / "speech"
-DUB_DIR = PROJECT_ROOT / "dub"
+OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+VIDEOS_DIR = OUTPUTS_DIR / "videos"
+SEPARATION_DIR = OUTPUTS_DIR / "separation"
+AUDIO_DIR = OUTPUTS_DIR / "audio"
+STT_DIR = OUTPUTS_DIR / "stt"
+TRANSLATE_DIR = OUTPUTS_DIR / "translate"
+SPEECH_DIR = OUTPUTS_DIR / "speech"
+DUB_DIR = OUTPUTS_DIR / "dub"

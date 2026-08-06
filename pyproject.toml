@@ -9,6 +9,10 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "bs-roformer-infer[mlx] @ git+https://github.com/openmirlab/bs-roformer-infer.git",
+    "funasr>=1.4.1",
+    "openai>=1.68.0",
+    "pydantic-ai>=0.2.0",
+    "pyannote-audio>=4.0.7",
     "python-dotenv>=1.0.0",
     "sarvamai>=0.1.30",
     "typer>=0.15.0",

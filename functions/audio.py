@@ -11,6 +11,9 @@ _VOLUME_DB_PATTERN = re.compile(r"mean_volume:\s*([-\d.]+)\s*dB")
 _MIN_MEASURABLE_VOLUME_DB = -55.0
 _MIN_GAIN_DB = -18.0
 _MAX_GAIN_DB = 18.0
+_MIN_ATEMPO = 0.5
+_MAX_ATEMPO = 2.0
+_DURATION_FIT_TOLERANCE = 0.08
 
 
 def measure_mean_volume_db(
@@ -107,4 +110,76 @@ def match_volume_to_reference(
         "reference_volume_db": round(reference_db, 2),
         "source_volume_db": round(source_db, 2),
         "applied_gain_db": round(max(_MIN_GAIN_DB, min(_MAX_GAIN_DB, gain_db)), 2),
+    }
+
+
+def measure_audio_duration(audio_path: Path) -> float:
+    """Return audio duration in seconds."""
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(audio_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "FFmpeg failed to probe audio duration")
+    return float(result.stdout.strip())
+
+
+def fit_audio_to_duration(
+    audio_path: Path,
+    target_seconds: float,
+) -> dict[str, float | bool] | None:
+    """Time-stretch audio toward a target slot duration using FFmpeg atempo."""
+    if target_seconds <= 0:
+        return None
+
+    source_seconds = measure_audio_duration(audio_path)
+    if source_seconds <= 0:
+        return None
+
+    ratio = source_seconds / target_seconds
+    if abs(ratio - 1.0) <= _DURATION_FIT_TOLERANCE:
+        return {
+            "source_duration_seconds": round(source_seconds, 3),
+            "target_duration_seconds": round(target_seconds, 3),
+            "fit_applied": False,
+        }
+
+    tempo = min(max(ratio, _MIN_ATEMPO), _MAX_ATEMPO)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir=audio_path.parent) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        command = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(audio_path),
+            "-af",
+            f"atempo={tempo:.4f}",
+            str(tmp_path),
+        ]
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "FFmpeg atempo failed")
+        tmp_path.replace(audio_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    fitted_seconds = measure_audio_duration(audio_path)
+    return {
+        "source_duration_seconds": round(source_seconds, 3),
+        "target_duration_seconds": round(target_seconds, 3),
+        "applied_tempo": round(tempo, 4),
+        "fitted_duration_seconds": round(fitted_seconds, 3),
+        "fit_applied": True,
     }

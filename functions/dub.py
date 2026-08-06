@@ -20,6 +20,21 @@ def _instrumental_path_for_name(name: str) -> Path:
     return instrumental_path
 
 
+def _segment_start_seconds(segment: dict[str, Any]) -> float:
+    return float(segment["start_time_seconds"])
+
+
+def _segment_slot_seconds(segment: dict[str, Any]) -> float | None:
+    if segment.get("slot_duration_seconds") is not None:
+        return max(float(segment["slot_duration_seconds"]), 0.0)
+    if "end_time_seconds" in segment:
+        return max(
+            float(segment["end_time_seconds"]) - _segment_start_seconds(segment),
+            0.0,
+        )
+    return None
+
+
 def _segments_with_audio(
     speech_dir: Path,
     segments: list[dict[str, Any]],
@@ -29,7 +44,7 @@ def _segments_with_audio(
         audio_path = speech_dir / segment["audio_file"]
         if audio_path.is_file():
             ready.append(segment)
-    return ready
+    return sorted(ready, key=_segment_start_seconds)
 
 
 def _build_audio_filter(
@@ -43,11 +58,18 @@ def _build_audio_filter(
 
     for offset, segment in enumerate(segments):
         input_index = speech_start_index + offset
-        delay_ms = int(round(segment["start_time_seconds"] * 1000))
+        delay_ms = int(round(_segment_start_seconds(segment) * 1000))
         label = f"v{offset}"
+        slot_seconds = _segment_slot_seconds(segment)
+        trim_filter = (
+            f"atrim=0:{slot_seconds:.3f},asetpts=PTS-STARTPTS,"
+            if slot_seconds and slot_seconds > 0
+            else ""
+        )
         filter_parts.append(
             f"[{input_index}:a]aresample=48000,"
             f"pan=stereo|c0=c0|c1=c0,"
+            f"{trim_filter}"
             f"adelay={delay_ms}|{delay_ms}[{label}]"
         )
         speech_labels.append(f"[{label}]")
@@ -63,7 +85,8 @@ def _build_audio_filter(
         vocals_label = "[vocals]"
 
     filter_parts.append(
-        f"[{instrumental_input_index}:a]{vocals_label}"
+        f"[{instrumental_input_index}:a]aresample=48000[inst];"
+        f"[inst]{vocals_label}"
         f"amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
     )
     return ";".join(filter_parts)
@@ -77,9 +100,9 @@ def dub_video(
     """Mux downloaded video with separated instrumental and dubbed speech.
 
     Args:
-        mapping_json: Path to ``speech/<name>/<name>.json`` segment mapping.
-        video: Source video file. Defaults to ``videos/<name>.mp4``.
-        output: Output video file. Defaults to ``dub/<name>.mp4``.
+        mapping_json: Path to ``outputs/speech/<name>/<name>.json`` segment mapping.
+        video: Source video file. Defaults to ``outputs/videos/<name>.mp4``.
+        output: Output video file. Defaults to ``outputs/dub/<name>.mp4``.
 
     Returns:
         Path to the dubbed video file.

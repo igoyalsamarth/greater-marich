@@ -22,7 +22,7 @@ def audio(
         None,
         "-o",
         "--output",
-        help="Output file or directory (default: audio/).",
+        help="Output file or directory (default: outputs/audio/).",
         file_okay=True,
         dir_okay=True,
     ),

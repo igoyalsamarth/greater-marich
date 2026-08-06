@@ -17,7 +17,7 @@ def video(
         VIDEOS_DIR,
         "-o",
         "--output",
-        help="Output directory.",
+        help="Output directory (default: outputs/videos).",
         dir_okay=True,
         file_okay=False,
     ),

@@ -9,26 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
-# Downloaded videos
-videos/
-
-# Separated audio stems
-separation/
-
-# Extracted audio
-audio/
-
-# Speech-to-text output
-stt/
-
-# Translations
-translate/
-
-# Generated speech snippets
-speech/
-
-# Dubbed videos
-dub/
+# Pipeline outputs
+outputs/
 
 
 .env*

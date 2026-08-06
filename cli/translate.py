@@ -20,13 +20,13 @@ def diarized(
         exists=True,
         dir_okay=False,
         readable=True,
-        help="Path to the STT output JSON file.",
+        help="Path to outputs/stt/<name>/dialogues.json.",
     ),
     output: Path | None = typer.Option(
         None,
         "-o",
         "--output",
-        help="Output JSON file or directory (default: translate/).",
+        help="Output JSON file or directory (default: outputs/translate/<name>/).",
         file_okay=True,
         dir_okay=True,
     ),
@@ -43,10 +43,10 @@ def diarized(
     model: str = typer.Option(
         DEFAULT_LLM_MODEL,
         "--model",
-        help="Sarvam chat model to use for translation.",
+        help="OpenAI chat model for the Pydantic AI translation agent.",
     ),
 ) -> None:
-    """Translate each diarized transcript entry using Sarvam's chat LLM."""
+    """Translate each diarized transcript entry using Pydantic AI + OpenAI."""
     path = translate_diarized_transcript(
         stt_json,
         output,

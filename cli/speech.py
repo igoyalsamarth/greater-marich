@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from functions.speech import generate_speech_snippets
+from functions.speech import DEFAULT_TTS_MODEL, generate_speech_snippets
 
 app = typer.Typer(help="Generate speech snippets from diarized transcripts.")
 
@@ -22,11 +22,16 @@ def generate(
         None,
         "-o",
         "--output",
-        help="Output directory (default: speech/<name>/).",
+        help="Output directory (default: outputs/speech/<name>/).",
         file_okay=False,
         dir_okay=True,
     ),
+    model: str = typer.Option(
+        DEFAULT_TTS_MODEL,
+        "--model",
+        help="Sarvam TTS model.",
+    ),
 ) -> None:
-    """Generate TTS audio snippets matched to separated vocals volume."""
-    path = generate_speech_snippets(transcript_json, output)
+    """Generate Sarvam TTS snippets from translated dialogues."""
+    path = generate_speech_snippets(transcript_json, output, model=model)
     typer.echo(f"Saved to {path}")
