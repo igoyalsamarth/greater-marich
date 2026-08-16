@@ -4,9 +4,31 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+
+from lib.emotion_profile import (
+    compact_emotion_profile,
+    dominant_emotion,
+    emotion_delivery_hint,
+    emotion_profile_from_entry,
+    legacy_emotion_profile,
+)
 
 CONTEXT_WINDOW = 2
+
+
+class CharacterAttributes(BaseModel):
+  """Signal and WavLM-derived speaker traits."""
+
+  model_config = ConfigDict(extra="ignore")
+
+  gender: str = "unknown"
+  gender_confidence: float | None = None
+  age_estimate: float | None = None
+  pitch_mean: float | None = None
+  pitch_range: float | None = None
+  speech_rate: float = 0.0
+  energy: float | None = None
 
 
 class CharacterPersona(BaseModel):
@@ -16,10 +38,79 @@ class CharacterPersona(BaseModel):
 
     id: str
     name: str | None = None
-    gender: str = "unknown"
-    pitch_mean: float | None = None
-    speech_rate: float = 0.0
-    dominant_emotions: list[str] = Field(default_factory=lambda: ["neutral"])
+    attributes: CharacterAttributes = Field(default_factory=CharacterAttributes)
+    emotion_profile: dict[str, float] = Field(default_factory=dict)
+
+    @property
+    def gender(self) -> str:
+        return self.attributes.gender
+
+    @property
+    def pitch_mean(self) -> float | None:
+        return self.attributes.pitch_mean
+
+    @property
+    def speech_rate(self) -> float:
+        return self.attributes.speech_rate
+
+    @property
+    def dominant_emotions(self) -> list[str]:
+        if not self.emotion_profile:
+            return ["neutral"]
+        ranked = sorted(
+            self.emotion_profile.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return [emotion for emotion, _score in ranked[:3]]
+
+    @computed_field
+    @property
+    def dominant_emotion(self) -> str:
+        return dominant_emotion(self.emotion_profile)
+
+    @computed_field
+    @property
+    def significant_emotions(self) -> dict[str, float]:
+        return compact_emotion_profile(self.emotion_profile)
+
+    @computed_field
+    @property
+    def delivery_hint(self) -> str:
+        return emotion_delivery_hint(self.emotion_profile)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        attributes = data.get("attributes")
+        if attributes is None and any(
+            key in data
+            for key in ("gender", "pitch_mean", "speech_rate", "energy", "pitch_range", "age_estimate")
+        ):
+            data = {
+                **data,
+                "attributes": {
+                    "gender": data.get("gender", "unknown"),
+                    "gender_confidence": data.get("gender_confidence"),
+                    "age_estimate": data.get("age_estimate"),
+                    "pitch_mean": data.get("pitch_mean"),
+                    "pitch_range": data.get("pitch_range"),
+                    "speech_rate": data.get("speech_rate", 0.0),
+                    "energy": data.get("energy"),
+                },
+            }
+
+        if not data.get("emotion_profile") and data.get("dominant_emotions"):
+            emotions = data["dominant_emotions"]
+            if isinstance(emotions, list) and emotions:
+                profile = {str(emotion): 0.0 for emotion in emotions}
+                profile[str(emotions[0])] = 1.0
+                data["emotion_profile"] = profile
+
+        return data
 
 
 class DialogueLine(BaseModel):
@@ -28,10 +119,38 @@ class DialogueLine(BaseModel):
     index: int
     transcript: str
     speaker_id: str
-    emotion: str
+    emotion_profile: dict[str, float] = Field(default_factory=dict)
     start_time_seconds: float
     end_time_seconds: float
     duration_seconds: float
+
+    @computed_field
+    @property
+    def dominant_emotion(self) -> str:
+        return dominant_emotion(self.emotion_profile)
+
+    @computed_field
+    @property
+    def significant_emotions(self) -> dict[str, float]:
+        return compact_emotion_profile(self.emotion_profile)
+
+    @computed_field
+    @property
+    def delivery_hint(self) -> str:
+        return emotion_delivery_hint(self.emotion_profile)
+
+    @property
+    def emotion(self) -> str:
+        return self.dominant_emotion
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_emotion(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if not data.get("emotion_profile") and data.get("emotion"):
+            data["emotion_profile"] = legacy_emotion_profile(str(data["emotion"]))
+        return data
 
 
 class EnrichedDialogueLine(BaseModel):
@@ -50,6 +169,13 @@ class EnrichedDialogueLine(BaseModel):
     speakability_hint: str | None = Field(
         default=None,
         description="Guidance for fitting speech into the allotted duration.",
+    )
+    delivery_hint: str | None = Field(
+        default=None,
+        description=(
+            "How this specific line should sound, combining line emotion_profile "
+            "with the speaker's baseline delivery."
+        ),
     )
 
 
@@ -143,7 +269,7 @@ def translated_entry_from_source(
             float(entry.get("end_time_seconds", entry.get("end", 0))), 3
         ),
         "speaker_id": str(entry.get("speaker_id") or entry.get("character_id") or ""),
-        "emotion": str(entry.get("emotion") or "neutral"),
+        "emotion_profile": emotion_profile_from_entry(entry),
     }
 
 
@@ -154,7 +280,7 @@ def dialogue_line_from_entry(index: int, entry: dict[str, Any]) -> DialogueLine:
         index=index,
         transcript=str(entry.get("transcript") or entry.get("text") or ""),
         speaker_id=str(entry.get("speaker_id") or entry.get("character_id") or ""),
-        emotion=str(entry.get("emotion") or "neutral"),
+        emotion_profile=emotion_profile_from_entry(entry),
         start_time_seconds=round(start, 3),
         end_time_seconds=round(end, 3),
         duration_seconds=round(max(end - start, 0.0), 3),
@@ -174,6 +300,17 @@ def _gap_before_seconds(
         entries[index].get("start_time_seconds", entries[index].get("start", 0))
     )
     return round(max(current_start - previous_end, 0.0), 3)
+
+
+def _delivery_hint(dialogue: DialogueLine, persona: CharacterPersona) -> str:
+    line_hint = dialogue.delivery_hint
+    persona_hint = persona.delivery_hint
+    if line_hint == persona_hint:
+        return line_hint
+    return (
+        f"Line delivery: {line_hint} "
+        f"Speaker baseline across the scene: {persona_hint}"
+    )
 
 
 def _speakability_hint(dialogue: DialogueLine, persona: CharacterPersona) -> str:
@@ -207,6 +344,7 @@ def enriched_dialogue_line(
         speakability_hint=(
             _speakability_hint(dialogue, persona) if include_speakability_hint else None
         ),
+        delivery_hint=_delivery_hint(dialogue, persona),
     )
 
 
@@ -263,9 +401,8 @@ def persona_for_speaker(
         return personas[speaker_id]
     return CharacterPersona(
         id=speaker_id or "unknown",
-        gender="unknown",
-        speech_rate=0.0,
-        dominant_emotions=["neutral"],
+        attributes=CharacterAttributes(),
+        emotion_profile={"neutral": 1.0},
     )
 
 

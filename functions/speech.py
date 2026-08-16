@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 import base64
-import json
 from pathlib import Path
 from typing import Any
 
 from client.sarvam_client import get_sarvam_client
 from functions.audio import match_volume_to_reference
 from functions.dialogues import dialogue_entries, load_dialogues
-from lib.constants import SEPARATION_DIR, SPEECH_DIR
+from functions.speech_shared import (
+    entry_duration,
+    entry_end,
+    entry_speaker_id,
+    entry_start,
+    entry_text,
+    segment_id,
+    source_name,
+    vocals_path_for_name,
+    write_speech_mapping,
+)
+from lib.constants import SPEECH_DIR
+from lib.emotion_profile import dominant_emotion, emotion_profile_from_entry
 
 DEFAULT_TTS_MODEL = "bulbul:v3"
 DEFAULT_SPEAKER = "kabir"
@@ -26,50 +37,6 @@ def _speech_dir_for_name(name: str) -> Path:
 
 def _speaker_for_id(speaker_id: str) -> str:
     return SPEAKER_VOICE_MAP.get(speaker_id, DEFAULT_SPEAKER)
-
-
-def _entry_text(entry: dict[str, Any]) -> str:
-    return str(entry.get("transcript") or entry.get("text") or "")
-
-
-def _entry_start(entry: dict[str, Any]) -> float:
-    if "start" in entry:
-        return float(entry["start"])
-    return float(entry["start_time_seconds"])
-
-
-def _entry_end(entry: dict[str, Any]) -> float:
-    if "end" in entry:
-        return float(entry["end"])
-    return float(entry["end_time_seconds"])
-
-
-def _entry_duration(entry: dict[str, Any]) -> float:
-    return max(_entry_end(entry) - _entry_start(entry), 0.0)
-
-
-def _entry_speaker_id(entry: dict[str, Any]) -> str:
-    return str(entry.get("speaker_id") or entry.get("character_id") or "")
-
-
-def _source_name(path: Path) -> str:
-    if path.stem == "dialogues":
-        return path.parent.name
-    return path.stem
-
-
-def _segment_id(index: int) -> str:
-    return f"{index:04d}"
-
-
-def _vocals_path_for_name(name: str) -> Path:
-    vocals_path = SEPARATION_DIR / name / f"{name}_vocals.wav"
-    if not vocals_path.is_file():
-        raise FileNotFoundError(
-            f"Separated vocals not found: {vocals_path}. "
-            "Run `separate run` on the converted audio first."
-        )
-    return vocals_path
 
 
 def generate_speech_snippets(
@@ -101,26 +68,26 @@ def generate_speech_snippets(
     data = load_dialogues(transcript_path)
     entries = dialogue_entries(data)
 
-    name = data.get("name") or _source_name(transcript_path)
+    name = data.get("name") or source_name(transcript_path)
     speech_dir = Path(output_dir).expanduser().resolve() if output_dir else _speech_dir_for_name(name)
     speech_dir.mkdir(parents=True, exist_ok=True)
-    vocals_path = _vocals_path_for_name(name)
+    vocals_path = vocals_path_for_name(name)
 
     client = get_sarvam_client()
     language_code = data.get("language_code") or "hi-IN"
 
     segments: list[dict[str, Any]] = []
     for index, entry in enumerate(entries, start=1):
-        segment_id = _segment_id(index)
-        audio_file = f"{segment_id}.wav"
+        seg_id = segment_id(index)
+        audio_file = f"{seg_id}.wav"
         audio_path = speech_dir / audio_file
 
-        text = _entry_text(entry).strip()
-        speaker_id = _entry_speaker_id(entry)
-        emotion = str(entry.get("emotion") or "neutral")
-        start_seconds = _entry_start(entry)
-        end_seconds = _entry_end(entry)
-        slot_seconds = _entry_duration(entry)
+        text = entry_text(entry).strip()
+        speaker_id = entry_speaker_id(entry)
+        emotion_profile = emotion_profile_from_entry(entry)
+        start_seconds = entry_start(entry)
+        end_seconds = entry_end(entry)
+        slot_seconds = entry_duration(entry)
 
         volume_match: dict[str, float] | None = None
         if text:
@@ -140,14 +107,15 @@ def generate_speech_snippets(
             )
 
         segment: dict[str, Any] = {
-            "id": segment_id,
+            "id": seg_id,
             "audio_file": audio_file,
             "start_time_seconds": round(start_seconds, 3),
             "end_time_seconds": round(end_seconds, 3),
             "slot_duration_seconds": round(slot_seconds, 3),
             "speaker_id": speaker_id,
             "character_id": speaker_id,
-            "emotion": emotion,
+            "emotion_profile": emotion_profile,
+            "emotion": dominant_emotion(emotion_profile),
             "transcript": text,
             "tts_speaker": _speaker_for_id(speaker_id),
         }
@@ -163,13 +131,12 @@ def generate_speech_snippets(
         "source_dialogues": data.get("source_dialogues"),
         "translation_model": data.get("translation_model"),
         "tts_model": model,
+        "tts_engine": "sarvam",
         "reference_vocals": str(vocals_path),
         "segments": segments,
     }
 
-    mapping_path = speech_dir / f"{name}.json"
-    mapping_path.write_text(
-        json.dumps(mapping, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    return write_speech_mapping(
+        mapping_path=speech_dir / f"{name}.json",
+        mapping=mapping,
     )
-    return mapping_path

@@ -1,4 +1,4 @@
-"""Speech-to-text with Sarvam diarization, embeddings, and emotion."""
+"""Speech-to-text with Sarvam diarization and WavLM character analysis."""
 
 from __future__ import annotations
 
@@ -7,14 +7,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from functions.dialogues import dialogue_entries
-from functions.stt_embeddings import average_embeddings, extract_voice_embedding
-from functions.stt_emotion import detect_emotion
 from functions.stt_features import (
-    dominant_emotions,
-    estimate_gender,
     extract_segment_file,
+    measure_energy,
     measure_pitch_mean,
+    measure_pitch_range,
     measure_speech_rate,
 )
 from functions.stt_transcribe import (
@@ -22,6 +19,12 @@ from functions.stt_transcribe import (
     DEFAULT_MODEL,
     DEFAULT_NUM_SPEAKERS,
     transcribe_audio as transcribe_with_sarvam,
+)
+from functions.stt_wavlm import (
+    aggregate_gender,
+    analyze_segments,
+    average_embeddings,
+    average_emotion_profiles,
 )
 from lib.constants import SEPARATION_DIR, STT_DIR
 
@@ -70,6 +73,12 @@ def _sarvam_diarized_entries(transcription: dict[str, Any]) -> list[dict[str, An
     return entries
 
 
+def _round_optional(value: float | None, digits: int = 1) -> float | None:
+    if value is None:
+        return None
+    return round(value, digits)
+
+
 def _build_characters(
     speaker_data: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -80,20 +89,43 @@ def _build_characters(
     ):
         data = speaker_data[character_id]
         pitch_values = data["pitch_values"]
-        pitch_mean = float(sum(pitch_values) / len(pitch_values)) if pitch_values else None
+        pitch_mean = (
+            float(sum(pitch_values) / len(pitch_values)) if pitch_values else None
+        )
+        pitch_ranges = data["pitch_ranges"]
+        pitch_range = (
+            float(sum(pitch_ranges) / len(pitch_ranges)) if pitch_ranges else None
+        )
         speech_rates = data["speech_rates"]
         speech_rate = (
             float(sum(speech_rates) / len(speech_rates)) if speech_rates else 0.0
         )
+        energy_values = data["energy_values"]
+        energy = (
+            float(sum(energy_values) / len(energy_values)) if energy_values else 0.0
+        )
+        age_estimates = data["age_estimates"]
+        age_estimate = (
+            float(sum(age_estimates) / len(age_estimates)) if age_estimates else None
+        )
+        gender, gender_confidence = aggregate_gender(data["sex_probabilities"])
+        emotion_profile = average_emotion_profiles(data["emotion_profiles"])
+
         characters.append(
             {
                 "id": character_id,
                 "name": None,
                 "voice_embedding": average_embeddings(data["embeddings"]),
-                "gender": estimate_gender(pitch_mean),
-                "pitch_mean": pitch_mean,
-                "speech_rate": round(speech_rate, 3),
-                "dominant_emotions": dominant_emotions(data["emotions"]),
+                "attributes": {
+                    "gender": gender,
+                    "gender_confidence": gender_confidence,
+                    "age_estimate": _round_optional(age_estimate),
+                    "pitch_mean": _round_optional(pitch_mean),
+                    "pitch_range": _round_optional(pitch_range),
+                    "speech_rate": round(speech_rate, 3),
+                    "energy": round(energy, 4),
+                },
+                "emotion_profile": emotion_profile,
             }
         )
     return characters
@@ -112,7 +144,7 @@ def transcribe_audio(
     """Transcribe separated vocals and produce character and dialogue outputs.
 
     Uses Sarvam for diarization and transcription, then enriches each turn with
-    voice embeddings, pitch, and emotion.
+    WavLM-large demographics, emotion, and signal-based audio features.
 
     Args:
         audio_path: Path to the converted audio file (for example ``outputs/audio/video1.wav``).
@@ -152,15 +184,22 @@ def transcribe_audio(
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
+        segment_jobs: list[dict[str, Any]] = []
+        segment_paths: list[Path] = []
+
         for index, entry in enumerate(entries):
             speaker = str(entry.get("speaker_id", ""))
             character_id = _speaker_to_character_id(speaker, speaker_to_character)
             if character_id not in speaker_data:
                 speaker_data[character_id] = {
                     "embeddings": [],
+                    "sex_probabilities": [],
+                    "emotion_profiles": [],
                     "pitch_values": [],
+                    "pitch_ranges": [],
                     "speech_rates": [],
-                    "emotions": [],
+                    "energy_values": [],
+                    "age_estimates": [],
                 }
 
             start = float(entry["start_time_seconds"])
@@ -170,25 +209,50 @@ def transcribe_audio(
             segment_path = extract_segment_file(
                 vocals_path, start, end, temp_path, index
             )
-            emotion = detect_emotion(segment_path)
-            embedding = extract_voice_embedding(segment_path)
-            pitch_mean = measure_pitch_mean(segment_path)
-            duration = max(end - start, 0.0)
-            speech_rate = measure_speech_rate(text, duration)
+            segment_paths.append(segment_path)
+            segment_jobs.append(
+                {
+                    "character_id": character_id,
+                    "text": text,
+                    "start": start,
+                    "end": end,
+                    "segment_path": segment_path,
+                }
+            )
 
-            speaker_data[character_id]["embeddings"].append(embedding)
+        analyses = analyze_segments(segment_paths)
+
+        for job, analysis in zip(segment_jobs, analyses, strict=True):
+            character_id = job["character_id"]
+            segment_path = job["segment_path"]
+            pitch_mean = measure_pitch_mean(segment_path)
+            pitch_range = measure_pitch_range(segment_path)
+            duration = max(job["end"] - job["start"], 0.0)
+            speech_rate = measure_speech_rate(job["text"], duration)
+            energy = measure_energy(segment_path)
+
+            speaker_data[character_id]["embeddings"].append(analysis["voice_embedding"])
+            speaker_data[character_id]["sex_probabilities"].append(
+                analysis["sex_probabilities"]
+            )
+            speaker_data[character_id]["emotion_profiles"].append(
+                analysis["emotion_profile"]
+            )
             if pitch_mean is not None:
                 speaker_data[character_id]["pitch_values"].append(pitch_mean)
+            if pitch_range is not None:
+                speaker_data[character_id]["pitch_ranges"].append(pitch_range)
             speaker_data[character_id]["speech_rates"].append(speech_rate)
-            speaker_data[character_id]["emotions"].append(emotion)
+            speaker_data[character_id]["energy_values"].append(energy)
+            speaker_data[character_id]["age_estimates"].append(analysis["age_estimate"])
 
             diarized_entries.append(
                 {
-                    "transcript": text,
-                    "start_time_seconds": round(start, 3),
-                    "end_time_seconds": round(end, 3),
+                    "transcript": job["text"],
+                    "start_time_seconds": round(job["start"], 3),
+                    "end_time_seconds": round(job["end"], 3),
                     "speaker_id": character_id,
-                    "emotion": emotion,
+                    "emotion_profile": analysis["emotion_profile"],
                 }
             )
 
@@ -209,6 +273,7 @@ def transcribe_audio(
                 "diarization_model": model,
                 "num_speakers": DEFAULT_NUM_SPEAKERS,
                 "transcription_model": model,
+                "character_analysis_model": "microsoft/wavlm-large",
                 "request_id": transcription.get("request_id"),
                 "transcript": transcription.get("transcript", ""),
                 "diarized_transcript": {"entries": diarized_entries},

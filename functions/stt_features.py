@@ -1,13 +1,10 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
-from collections import Counter
 from pathlib import Path
 
 import numpy as np
-
-from functions.stt_emotion import normalize_emotion
-
 
 def extract_audio_segment(
     source_audio: Path,
@@ -95,10 +92,10 @@ def _estimate_pitch_hz(
     return sample_rate / lag
 
 
-def measure_pitch_mean(audio_path: Path) -> float | None:
+def _collect_pitch_values(audio_path: Path) -> list[float]:
     audio, sample_rate = _read_mono_wav(audio_path)
     if audio.size == 0:
-        return None
+        return []
 
     frame_length = sample_rate // 10
     hop_length = frame_length // 2
@@ -107,20 +104,28 @@ def measure_pitch_mean(audio_path: Path) -> float | None:
         pitch = _estimate_pitch_hz(audio[start : start + frame_length], sample_rate)
         if pitch is not None:
             pitch_values.append(pitch)
+    return pitch_values
 
+
+def measure_pitch_mean(audio_path: Path) -> float | None:
+    pitch_values = _collect_pitch_values(audio_path)
     if not pitch_values:
         return None
     return float(np.median(pitch_values))
 
 
-def estimate_gender(pitch_mean: float | None) -> str:
-    if pitch_mean is None:
-        return "unknown"
-    if pitch_mean >= 170:
-        return "female"
-    if pitch_mean <= 140:
-        return "male"
-    return "unknown"
+def measure_pitch_range(audio_path: Path) -> float | None:
+    pitch_values = _collect_pitch_values(audio_path)
+    if len(pitch_values) < 2:
+        return None
+    return float(np.percentile(pitch_values, 75) - np.percentile(pitch_values, 25))
+
+
+def measure_energy(audio_path: Path) -> float:
+    audio, _sample_rate = _read_mono_wav(audio_path)
+    if audio.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(audio))))
 
 
 def measure_speech_rate(text: str, duration_seconds: float) -> float:
@@ -130,14 +135,6 @@ def measure_speech_rate(text: str, duration_seconds: float) -> float:
     if not words:
         return 0.0
     return len(words) / duration_seconds
-
-
-def dominant_emotions(emotions: list[str], limit: int = 3) -> list[str]:
-    cleaned = [normalize_emotion(emotion) for emotion in emotions if emotion]
-    if not cleaned:
-        return ["neutral"]
-    counts = Counter(cleaned)
-    return [emotion for emotion, _count in counts.most_common(limit)]
 
 
 def extract_segment_file(
@@ -150,3 +147,52 @@ def extract_segment_file(
     segment_path = temp_dir / f"segment_{index:04d}.wav"
     extract_audio_segment(source_audio, start, end, segment_path)
     return segment_path
+
+
+def concat_audio_segments(
+    segment_paths: list[Path],
+    output_path: Path,
+) -> float:
+    """Concatenate mono WAV clips into one file. Returns total duration in seconds."""
+    if not segment_paths:
+        raise ValueError("segment_paths must not be empty")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(segment_paths) == 1:
+        shutil.copy2(segment_paths[0], output_path)
+    else:
+        list_path = output_path.with_suffix(".concat.txt")
+        list_path.write_text(
+            "\n".join(f"file '{path.resolve()}'" for path in segment_paths),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                str(output_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        list_path.unlink(missing_ok=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                result.stderr.strip() or "FFmpeg failed to concatenate audio"
+            )
+
+    audio, sample_rate = _read_mono_wav(output_path)
+    return audio.size / sample_rate

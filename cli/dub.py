@@ -34,7 +34,12 @@ def create(
         file_okay=True,
         dir_okay=False,
     ),
+    speech_gain_db: float = typer.Option(
+        0.0,
+        "--speech-gain-db",
+        help="Extra gain (dB) applied to the speech bus after source matching.",
+    ),
 ) -> None:
     """Mux downloaded video with separated instrumental and dubbed speech."""
-    path = dub_video(mapping_json, video, output)
+    path = dub_video(mapping_json, video, output, speech_gain_db=speech_gain_db)
     typer.echo(f"Saved to {path}")

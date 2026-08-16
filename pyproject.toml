@@ -6,10 +6,9 @@ readme = "README.md"
 authors = [
     { email = "samarth.goyal1999@gmail.com" }
 ]
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "bs-roformer-infer[mlx] @ git+https://github.com/openmirlab/bs-roformer-infer.git",
-    "funasr>=1.4.1",
     "openai>=1.68.0",
     "pydantic-ai>=0.2.0",
     "pyannote-audio>=4.0.7",
@@ -17,6 +16,17 @@ dependencies = [
     "sarvamai>=0.1.30",
     "typer>=0.15.0",
     "yt-dlp>=2025.1.0",
+    "transformers>=5.14.1",
+    "torch>=2.13.0",
+    "torchaudio>=2.11.0",
+    "loralib>=0.1.2",
+    "speechbrain>=1.1.0",
+]
+
+[project.optional-dependencies]
+chatterbox = [
+    "chatterbox-tts>=0.1.7",
+    "librosa>=0.10.2",
 ]
 
 [project.scripts]
@@ -24,6 +34,13 @@ greater-marich = "main:main"
 
 [tool.uv]
 package = false
+python-preference = "managed"
+override-dependencies = [
+    "transformers>=5.14.1",
+    "torch>=2.13.0",
+    "torchaudio>=2.11.0",
+    "safetensors>=0.8.0",
+]
 
 [build-system]
 requires = ["hatchling"]

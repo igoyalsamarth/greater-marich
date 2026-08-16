@@ -47,7 +47,7 @@ def transcribe(
         help="Transcription mode for saaras models.",
     ),
 ) -> None:
-    """Transcribe separated vocals with Sarvam diarization and emotion enrichment."""
+    """Transcribe separated vocals with Sarvam diarization and WavLM character analysis."""
     dialogues_path = transcribe_audio(
         audio,
         output,

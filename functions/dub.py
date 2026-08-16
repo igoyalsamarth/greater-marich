@@ -7,7 +7,16 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from functions.audio import (
+    compute_volume_gain_db,
+    measure_mean_volume_db,
+    speech_bus_gain_db,
+)
 from lib.constants import DUB_DIR, SEPARATION_DIR, VIDEOS_DIR
+
+
+def _name_for_mapping(mapping_path: Path, data: dict[str, Any]) -> str:
+    return str(data.get("name") or mapping_path.stem)
 
 
 def _instrumental_path_for_name(name: str) -> Path:
@@ -20,19 +29,52 @@ def _instrumental_path_for_name(name: str) -> Path:
     return instrumental_path
 
 
+def _reference_vocals_path(name: str, data: dict[str, Any]) -> Path:
+    vocals_path = SEPARATION_DIR / name / f"{name}_vocals.wav"
+    if vocals_path.is_file():
+        return vocals_path
+
+    reference = data.get("reference_vocals")
+    if reference:
+        vocals_path = Path(reference).expanduser().resolve()
+        if vocals_path.is_file():
+            return vocals_path
+
+    raise FileNotFoundError(
+        f"Separated vocals not found for {name!r}. "
+        "Run `separate run` on the converted audio first."
+    )
+
+
 def _segment_start_seconds(segment: dict[str, Any]) -> float:
     return float(segment["start_time_seconds"])
 
 
-def _segment_slot_seconds(segment: dict[str, Any]) -> float | None:
+def _segment_end_seconds(segment: dict[str, Any]) -> float | None:
+    if segment.get("end_time_seconds") is not None:
+        return float(segment["end_time_seconds"])
     if segment.get("slot_duration_seconds") is not None:
-        return max(float(segment["slot_duration_seconds"]), 0.0)
-    if "end_time_seconds" in segment:
-        return max(
-            float(segment["end_time_seconds"]) - _segment_start_seconds(segment),
-            0.0,
-        )
+        return _segment_start_seconds(segment) + float(segment["slot_duration_seconds"])
     return None
+
+
+def _segment_volume_gain_db(
+    segment: dict[str, Any],
+    speech_path: Path,
+    reference_vocals: Path,
+) -> float:
+    end_seconds = _segment_end_seconds(segment)
+    if end_seconds is None:
+        return 0.0
+
+    reference_db = measure_mean_volume_db(
+        reference_vocals,
+        start_seconds=_segment_start_seconds(segment),
+        end_seconds=end_seconds,
+    )
+    speech_db = measure_mean_volume_db(speech_path)
+    gain_db = compute_volume_gain_db(reference_db, speech_db)
+    return gain_db if gain_db is not None else 0.0
 
 
 def _segments_with_audio(
@@ -50,6 +92,10 @@ def _segments_with_audio(
 def _build_audio_filter(
     segments: list[dict[str, Any]],
     *,
+    speech_dir: Path,
+    reference_vocals: Path,
+    instrumental_path: Path,
+    speech_gain_db: float = 0.0,
     instrumental_input_index: int = 1,
     speech_start_index: int = 2,
 ) -> str:
@@ -60,16 +106,17 @@ def _build_audio_filter(
         input_index = speech_start_index + offset
         delay_ms = int(round(_segment_start_seconds(segment) * 1000))
         label = f"v{offset}"
-        slot_seconds = _segment_slot_seconds(segment)
-        trim_filter = (
-            f"atrim=0:{slot_seconds:.3f},asetpts=PTS-STARTPTS,"
-            if slot_seconds and slot_seconds > 0
+        speech_path = speech_dir / segment["audio_file"]
+        gain_db = _segment_volume_gain_db(segment, speech_path, reference_vocals)
+        volume_filter = (
+            f"volume={gain_db:.2f}dB,"
+            if abs(gain_db) >= 0.05
             else ""
         )
         filter_parts.append(
             f"[{input_index}:a]aresample=48000,"
             f"pan=stereo|c0=c0|c1=c0,"
-            f"{trim_filter}"
+            f"{volume_filter}"
             f"adelay={delay_ms}|{delay_ms}[{label}]"
         )
         speech_labels.append(f"[{label}]")
@@ -84,6 +131,11 @@ def _build_audio_filter(
         )
         vocals_label = "[vocals]"
 
+    bus_gain_db = speech_bus_gain_db(reference_vocals, instrumental_path) + speech_gain_db
+    if abs(bus_gain_db) >= 0.05:
+        filter_parts.append(f"{vocals_label}volume={bus_gain_db:.2f}dB[vocals_boosted]")
+        vocals_label = "[vocals_boosted]"
+
     filter_parts.append(
         f"[{instrumental_input_index}:a]aresample=48000[inst];"
         f"[inst]{vocals_label}"
@@ -96,13 +148,20 @@ def dub_video(
     mapping_json: str | Path,
     video: str | Path | None = None,
     output: str | Path | None = None,
+    *,
+    speech_gain_db: float = 0.0,
 ) -> Path:
     """Mux downloaded video with separated instrumental and dubbed speech.
+
+    Each speech clip is gain-matched to its source vocal slice before mixing.
+    When the instrumental stem is louder than the vocals stem, the speech bus is
+    boosted so dialogue is not buried under the music.
 
     Args:
         mapping_json: Path to ``outputs/speech/<name>/<name>.json`` segment mapping.
         video: Source video file. Defaults to ``outputs/videos/<name>.mp4``.
         output: Output video file. Defaults to ``outputs/dub/<name>.mp4``.
+        speech_gain_db: Extra gain applied to the speech bus after matching.
 
     Returns:
         Path to the dubbed video file.
@@ -112,7 +171,7 @@ def dub_video(
         raise FileNotFoundError(f"Mapping JSON not found: {mapping_path}")
 
     data: dict[str, Any] = json.loads(mapping_path.read_text(encoding="utf-8"))
-    name = data.get("name") or mapping_path.stem
+    name = _name_for_mapping(mapping_path, data)
     segments = _segments_with_audio(mapping_path.parent, data.get("segments") or [])
     if not segments:
         raise RuntimeError("No speech audio files found for mapping JSON")
@@ -123,11 +182,18 @@ def dub_video(
         raise FileNotFoundError(f"Video not found: {video_path}")
 
     instrumental_path = _instrumental_path_for_name(name)
+    reference_vocals = _reference_vocals_path(name, data)
 
     output_path = Path(output).expanduser().resolve() if output else DUB_DIR / f"{name}.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    filter_complex = _build_audio_filter(segments)
+    filter_complex = _build_audio_filter(
+        segments,
+        speech_dir=speech_dir,
+        reference_vocals=reference_vocals,
+        instrumental_path=instrumental_path,
+        speech_gain_db=speech_gain_db,
+    )
 
     command = [
         "ffmpeg",
