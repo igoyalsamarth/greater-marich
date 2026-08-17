@@ -5,7 +5,12 @@ from pathlib import Path
 import typer
 
 from functions.speech_chatterbox import generate_chatterbox_speech
-from lib.chatterbox_loader import DEFAULT_MODEL, HINDI_LANGUAGE_ID, download_chatterbox_model
+from lib.chatterbox_loader import (
+    DEFAULT_MODEL,
+    HINDI_LANGUAGE_ID,
+    download_chatterbox_model,
+    normalize_chatterbox_language_id,
+)
 
 app = typer.Typer(help="Generate speech with Chatterbox Multilingual Hindi cloning.")
 
@@ -48,7 +53,7 @@ def generate(
     language_id: str = typer.Option(
         HINDI_LANGUAGE_ID,
         "--language-id",
-        help="Chatterbox language id (hi for Hindi).",
+        help="Chatterbox language id. Must be ISO 639-1 'hi', not 'hi-IN'.",
     ),
 ) -> None:
     """Generate Hindi speech with zero-shot voice cloning from separated vocals."""
@@ -56,6 +61,6 @@ def generate(
         transcript_json,
         output,
         model_id=model,
-        language_id=language_id,
+        language_id=normalize_chatterbox_language_id(language_id),
     )
     typer.echo(f"Saved to {path}")

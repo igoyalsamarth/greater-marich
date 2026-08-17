@@ -27,6 +27,7 @@ dependencies = [
 chatterbox = [
     "chatterbox-tts>=0.1.7",
     "librosa>=0.10.2",
+    "silero-vad>=5.1",
 ]
 
 [project.scripts]

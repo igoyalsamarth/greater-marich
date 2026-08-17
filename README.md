@@ -25,7 +25,7 @@ Translation writes:
 
 Speech uses **Sarvam Bulbul** (`bulbul:v3` by default) on translated dialogues, with vocals volume matching per segment.
 
-Chatterbox speech (`speech-chatterbox`) uses **[ResembleAI/Chatterbox-Multilingual-hi](https://huggingface.co/ResembleAI/Chatterbox-Multilingual-hi)** zero-shot cloning. For each speaker it concatenates all of their source vocal segments from the separated vocals track into one reference clip, then synthesizes each translated Hindi line with per-line `emotion_profile` mapped to Chatterbox exaggeration.
+Chatterbox speech (`speech-chatterbox`) uses **[ResembleAI/Chatterbox-Multilingual-hi](https://huggingface.co/ResembleAI/Chatterbox-Multilingual-hi)** zero-shot cloning. For each speaker it builds one clean 6–15s reference from complete vocal utterances (skipping silence, music, overlap, clipped words, and noisy clips), then synthesizes each translated Hindi line with language id `hi` and a light nudge around `exaggeration=0.5`, `temperature=0.6`, and `cfg_weight=0.4` from the line's `emotion_profile`. Generated clips keep the full Chatterbox take. Silero VAD only soft-cuts leftover speech from ``source_end - 0.5s`` onward, then ``atempo`` aims just under ``slot + 1s`` (max 1.35x). A hard cap at ``slot + 2s`` still clips anything left over. Short lines still get a small CFG bump so they don't come out word-by-word. Dub still gain-matches at mix time.
 
 Install Chatterbox extras first:
 

@@ -54,6 +54,11 @@ def vocals_path_for_name(name: str) -> Path:
     return vocals_path
 
 
+def instrumental_path_for_name(name: str) -> Path | None:
+    instrumental_path = SEPARATION_DIR / name / f"{name}_instrumental.wav"
+    return instrumental_path if instrumental_path.is_file() else None
+
+
 def resolve_source_dialogues(
     data: dict[str, Any],
     transcript_path: Path,
