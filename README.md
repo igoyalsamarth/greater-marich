@@ -1,5 +1,12 @@
 # greater-marich
 
+## Demo Output
+
+https://github.com/user-attachments/assets/65399a47-6b7b-4431-806a-e9764f67ef4d
+
+
+
+
 ## Setup
 
 Add these to your `.env`:
